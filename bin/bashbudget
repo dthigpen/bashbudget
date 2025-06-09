@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+function usage {
+  cat <<EOF # remove the space between << and EOF, this is due to web plugin issue
+Usage: $(basename "${BASH_SOURCE[0]}") [import|list|view|edit] [options] file1 file2 ...
+
+Track transactions and generate reports on spending
+
+Available options:
+
+-h, --help      					Print this help and exit
+EOF
+  exit
+}
+
+function msg {
+  echo >&2 -e "${@}"
+}
+
+function die {
+  local msg=$1
+  local code=${2-1} # default exit status 1
+  msg "$msg"
+  exit "$code"
+}
+
+function parse_ini {
+	local path="${1?Must provide a path to an ini file}"
+	unset INI_CONFIG
+	declare -gA INI_CONFIG
+	local comment_re='^[;#].*$'
+	local blank_re='^\s*$'
+	while IFS='=' read -r key value; do
+		[[ "${key}" =~ ${comment_re} || "${key}" =~ ${blank_re} || -z "${key}" ]] && continue
+		INI_CONFIG["${key}"]="${value}"
+	done < "${path}"
+
+	# array support
+	# IFS=',' read -r -a TAGS <<< "${INI_CONFIG["tags"]}"
+}
+
+
+function parse_args {
+	POSITIONAL_ARGUMENTS=()
+	while [[ $# -gt 0 ]]; do
+		# msg "ARG: ${1-}"
+	    case "${1-}" in
+		    -h | --help) usage ;;
+		    -?*) die "Unknown option: $1" ;;
+		    *) POSITIONAL_ARGUMENTS+=( "${1-}" ) ;;
+	    esac
+	    shift
+  	done
+  	if [[ ${#POSITIONAL_ARGUMENTS[@]} -lt 1 ]]
+  	then
+		die "Must provide more arguments. See usage with --help"
+  	fi
+}
+
+
+function main {
+	echo 'Done'
+}
+
+parse_args "${@}"
+main
