@@ -10,7 +10,7 @@ check: lint test
 
 test:
 	@echo "Running tests with Bats..."
-	@$(BATS) $(TEST_DIR)
+	@$(BATS) $(TEST_DIR)/test_*
 
 lint:
 	@echo "Running shellcheck on script..."

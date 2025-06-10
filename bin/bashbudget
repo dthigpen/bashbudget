@@ -28,12 +28,12 @@ function die {
 
 function parse_ini {
 	local path="${1?Must provide a path to an ini file}"
-	unset INI_CONFIG
-	declare -gA INI_CONFIG
+	declare -gA INI_CONFIG=()
 	local comment_re='^[;#].*$'
 	local blank_re='^\s*$'
+	# TODO improve this implementation to be closer to INI spec
 	while IFS='=' read -r key value; do
-		[[ "${key}" =~ ${comment_re} || "${key}" =~ ${blank_re} || -z "${key}" ]] && continue
+		[[ "${key}" =~ ${comment_re} || "${key}" =~ ${blank_re} || -z "${key}" || -z "${value}" ]] && continue
 		INI_CONFIG["${key}"]="${value}"
 	done < "${path}"
 
@@ -64,5 +64,8 @@ function main {
 	echo 'Done'
 }
 
-parse_args "${@}"
-main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+	parse_args "${@}"
+	main
+fi

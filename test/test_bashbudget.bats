@@ -1,7 +1,10 @@
 #!/usr/bin/env bats
 
+function setup {
+	export PATH="${BATS_TEST_DIRNAME}/../bin/:${PATH}"
+}
 @test "show usage on help" {
-	run "${BATS_TEST_DIRNAME}"/../bin/bashbudget -h
+	run bashbudget -h
 	[ "${status}" -eq 0 ]
 	[[ "${output}" == *'Usage: bashbudget'* ]]
 	run "${BATS_TEST_DIRNAME}"/../bin/bashbudget --help
