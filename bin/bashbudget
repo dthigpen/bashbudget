@@ -4,6 +4,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
 	set -Eeuo pipefail
 fi
+OLD_IFS="${IFS}"
 
 function usage {
   cat <<EOF # remove the space between << and EOF, this is due to web plugin issue
@@ -31,14 +32,14 @@ function die {
 
 function parse_ini {
 	 local file="${1?Must provide a path to an INI config file}"
-	 declare -gA INI_CONFIG=()
-	 export INI_CONFIG
+	 local -n out="${2?Must provide an associative array output variable}"
+	 # declare -gA INI_CONFIG=()
+	 # export INI_CONFIG
 	 local line_num=0
 	 local line key value
 
 	 while IFS= read -r line || [[ -n $line ]]; do
 		line_num=$((line_num + 1))
-		msg "Line: ${line}"
 		line="${line#"${line%%[![:space:]]*}"}"  # ltrim
 		# line="${line%"${line##*[![:space:]]}"}"  # rtrim
 
@@ -51,7 +52,7 @@ function parse_ini {
 		if [[ "${line}" =~ ^([^[:space:]=]+)=(.*)$ ]]; then
 		  key="${BASH_REMATCH[1]}"
 		  value="${BASH_REMATCH[2]}"
-		  INI_CONFIG["${key}"]="${value}"
+		  out["${key}"]="${value}"
 		  continue
 		fi
 
@@ -66,10 +67,15 @@ function parse_ini {
 
 function parse_args {
 	POSITIONAL_ARGUMENTS=()
+	IMPORTER_NAME_OR_PATH=''
+	TXNS_FILE_PATH='bashbudget_txns.csv'
 	while [[ $# -gt 0 ]]; do
 		# msg "ARG: ${1-}"
 	    case "${1-}" in
 		    -h | --help) usage ;;
+		    --importer)
+		    	IMPORTER_NAME_OR_PATH="${2-}"
+		    	shift ;;
 		    -?*) die "Unknown option: $1" ;;
 		    *) POSITIONAL_ARGUMENTS+=( "${1-}" ) ;;
 	    esac
@@ -79,11 +85,237 @@ function parse_args {
   	then
 		die "Must provide more arguments. See usage with --help"
   	fi
+  	ACTION="${POSITIONAL_ARGUMENTS[0]}"
+  	ARGS=("${POSITIONAL_ARGUMENTS[@]:1}")
 }
 
+function assert_existing_file {
+	local path="${1?Must provide a file path}"
+	if [[ ! -f "${path}" ]]
+	then
+		die "File does not exist: ${path}"
+	fi
+}
+
+function print_associative_array {
+	local -n array=$1
+	for x in "${!array[@]}"
+	do
+		msg "$(printf "[%s]=%s\n" "$x" "${array[$x]}")"
+	done
+}
+function join {
+	local IFS="${1}"
+	shift
+	echo "$*"
+}
+function find_matching_importer {
+	local -n importer_config_out="${1?Must provide an output variable name}"
+	local identifier="${2:-}"
+	# declare -A importer_config=()
+	if [[ -n "${identifier}" ]]
+	then
+		# search for specific file path
+		# otherwise loop through all importers and find name
+		if [[ -f "${identifier}" ]]
+		then
+			parse_ini "${identifier}" importer_config_out
+			return
+		else
+			shopt -s nullglob
+			for importer_file in *_importer.ini
+			do
+				parse_ini "${importer_file}" importer_config_out
+				if [[ "${importer_config_out[name]}" == "${identifier}" ]]
+				then
+					shopt -u nullglob
+					return
+				fi
+			done
+			shopt -u nullglob
+		fi
+	else
+		# TODO loop through all importers, check if transactions_file_path matches condition
+		die 'Finding matching importer not supported. Use --importer <importer> for now'
+	fi
+	# unset INI_CONFIG
+	return 1
+}
+
+function rename_txn_fields {
+	local -n config="$1"
+	local rename_args=""
+
+	for key in "${!config[@]}"; do
+		if [[ "$key" == *_column ]]; then
+			local newname="${key%_column}"
+			local oldname="${config[$key]}"
+			if [[ "${newname}" == 'desc' ]]
+			then
+				newname='description'
+			fi
+	     	rename_args+="${oldname},${newname},"
+	   fi
+	done
+	rename_args="${rename_args%,}"
+	if [[ -n "$rename_args" ]]; then
+		mlr --csv rename "$rename_args"
+	else
+		cat
+	fi
+}
+
+function inject_constant_fields {
+  local -n config="$1"
+  local put_exprs=()
+
+  for key in "${!config[@]}"; do
+    if [[ "$key" == *_value ]]; then
+      local field="${key%_value}"
+      local value="${config[$key]}"
+      put_exprs+=("\$$field=\"$value\"")
+    fi
+  done
+
+  if (( ${#put_exprs[@]} )); then
+    local put_chain
+    put_chain=$(IFS='; '; echo "${put_exprs[*]}")
+    mlr --csv put "$put_chain"
+  else
+    cat
+  fi
+}
+
+function filter_relevant_columns {
+	local columns="$(join , "${TXNS_FILE_COLUMNS[@]}")"
+	mlr --csv cut -f "${columns}" 'then' 'cat'
+}
+
+function read_external_txns {
+	local input_file="${1?Must provide a path to a transactions file}"
+	local importer_identifier="${2-}"
+	declare -A importer_config=()
+	if ! find_matching_importer importer_config "${importer_identifier}"
+	then
+		die "Unable to find importer by path or name. Use --importer <name|path>. (e.g. --importer my_card_importer.ini)"
+	fi
+	mlr --csv --from "${input_file}" cat |
+	rename_txn_fields importer_config |
+	filter_relevant_columns |
+	inject_constant_fields importer_config |
+	add_optional_columns_to_txns |
+	reorder_txn_fields
+}
+
+function init_txns_file {
+	local txns_file_path="${1?Must provide a txns file path}"
+	if [[ ! -f "${txns_file_path}" ]]
+	then
+		join , "${TXNS_FILE_COLUMNS[@]}" > "${txns_file_path}"
+	fi
+}
+
+function get_max_id {
+	local db_file="${1}"
+	if [ ! -f "${db_file}" ]
+	then
+		echo 0
+	else
+		mlr --csv filter '$id=~"^[0-9]+$"' then sort -nr id then head -n 1 "${TXNS_FILE_PATH}" | mlr --csv cut -f 'id' | tail -n 1
+	fi
+}
+
+REQUIRED_COLUMNS=(date description amount account)
+OPTIONAL_COLUMNS=(category)
+TXNS_FILE_COLUMNS=(id date description amount account category)
+
+function check_for_required_columns {
+	local header
+	header=$(head -n 1)
+	IFS=',' read -r -a header_columns <<< "${header}"
+	# IFS="${OLD_IFS}"
+	msg "HEADER: ${header}"
+	local missing=()
+	for required in "${REQUIRED_COLUMNS[@]}"
+	do
+		local found=false
+		for col in "${header_columns[@]}"
+		do
+			if [[ "${col}" == "${required}" ]]
+			then
+				found=true
+				break
+			fi
+		done
+		if ! ${found}
+		then
+			missing+=("${required}")
+		fi
+	done
+
+	if (( ${#missing[@]} > 0 ))
+	then
+		die "Error missing columns: ${missing[*]}"
+	fi
+	# Emit header and pass through the rest of the stream
+	echo "${header}"
+	cat
+}
+function add_optional_columns_to_txns {
+	local putexprs=()
+	for col in "${OPTIONAL_COLUMNS[@]}"
+	do
+		put_exprs+=("if (!haskey(\$*, \"$col\")) { \$$col = \"\"}")
+	done
+	local put_chain
+	put_chain=$(IFS='; '; echo "${put_exprs[*]}")
+	mlr --csv put "${put_chain}"
+	
+}
+
+function reorder_txn_fields {
+	local fields
+	fields=$(IFS=','; echo "${TXNS_FILE_COLUMNS[*]}")
+	mlr --csv reorder -f "${fields}"
+}
+
+function add_id_column_to_txns {
+	local start_id="${1}"
+	mlr --csv put '
+	  begin { @i = '"${start_id}"' }
+	  $id = @i;
+	  @i += 1
+	' 'then' reorder -f id
+}
+function import_transactions {
+	# validate import args
+	if [[ "${#ARGS[@]}" -lt 1 ]]
+	then
+		die "Must provide a transaction file path as first import argument"
+	fi
+	
+	# check that file exists
+	# init the txns db file if not present
+	# get the next txn id to use
+	local file_to_import="${ARGS[0]}"
+	assert_existing_file "${file_to_import}"
+	init_txns_file "${TXNS_FILE_PATH}"
+	local start_id=$(( $(get_max_id "${TXNS_FILE_PATH}") + 1 ))
+
+	# read txns
+	# add id column
+	# add to txns file
+	read_external_txns "${file_to_import}" "${IMPORTER_NAME_OR_PATH}" |
+	tee /dev/stderr |
+	add_id_column_to_txns "${start_id}" |
+	tail -n +2 >> "${TXNS_FILE_PATH}"
+}
 
 function main {
-	echo 'Done'
+	case "${ACTION}" in
+		import) import_transactions ;;
+		*) die "Unsupported command '${ACTION}'" ;;
+	esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
