@@ -5,18 +5,20 @@ then
 	set -Eeuo pipefail
 fi
 OLD_IFS="${IFS}"
-
+TXNS_FILE_PATH='bashbudget_txns.csv'
 function usage {
+  local exit_code=${1-0}
   cat <<EOF # remove the space between << and EOF, this is due to web plugin issue
-Usage: $(basename "${BASH_SOURCE[0]}") [import|list|view|edit] [options] file1 file2 ...
+Usage: $(basename "${BASH_SOURCE[0]}") [import|reports] [options] file1 file2 ...
 
 Track transactions and generate reports on spending
 
-Available options:
-
--h, --help      					Print this help and exit
+Commands:
+-h, --help      				  Print this help and exit
+import <file> --importer <file>   Import and normalize transactions
+reports totals [--from --to]      Generate category/monthly total
 EOF
-  exit
+  exit "${exit_code}"
 }
 
 function msg {
@@ -64,39 +66,6 @@ function parse_ini {
 	# IFS=',' read -r -a TAGS <<< "${INI_CONFIG["tags"]}"
 }
 
-
-function parse_args {
-	POSITIONAL_ARGUMENTS=()
-	IMPORTER_NAME_OR_PATH=''
-	TXNS_FILE_PATH='bashbudget_txns.csv'
-	while [[ $# -gt 0 ]]; do
-		# msg "ARG: ${1-}"
-	    case "${1-}" in
-		    -h | --help) usage ;;
-		    --importer)
-		    	IMPORTER_NAME_OR_PATH="${2-}"
-		    	shift ;;
-		    -?*) die "Unknown option: $1" ;;
-		    *) POSITIONAL_ARGUMENTS+=( "${1-}" ) ;;
-	    esac
-	    shift
-  	done
-  	if [[ ${#POSITIONAL_ARGUMENTS[@]} -lt 1 ]]
-  	then
-		die "Must provide more arguments. See usage with --help"
-  	fi
-  	ACTION="${POSITIONAL_ARGUMENTS[0]}"
-  	ARGS=("${POSITIONAL_ARGUMENTS[@]:1}")
-}
-
-function assert_existing_file {
-	local path="${1?Must provide a file path}"
-	if [[ ! -f "${path}" ]]
-	then
-		die "File does not exist: ${path}"
-	fi
-}
-
 function print_associative_array {
 	local -n array=$1
 	for x in "${!array[@]}"
@@ -104,7 +73,7 @@ function print_associative_array {
 		msg "$(printf "[%s]=%s\n" "$x" "${array[$x]}")"
 	done
 }
-function join {
+function join_args {
 	local IFS="${1}"
 	shift
 	echo "$*"
@@ -154,6 +123,10 @@ function rename_txn_fields {
 			then
 				newname='description'
 			fi
+			if [[ "${oldname}" == "${newname}" ]]
+			then
+				continue
+			fi
 	     	rename_args+="${oldname},${newname},"
 	   fi
 	done
@@ -187,31 +160,15 @@ function inject_constant_fields {
 }
 
 function filter_relevant_columns {
-	local columns="$(join , "${TXNS_FILE_COLUMNS[@]}")"
+	local columns="$(join_args , "${TXNS_FILE_COLUMNS[@]}")"
 	mlr --csv cut -f "${columns}" 'then' 'cat'
-}
-
-function read_external_txns {
-	local input_file="${1?Must provide a path to a transactions file}"
-	local importer_identifier="${2-}"
-	declare -A importer_config=()
-	if ! find_matching_importer importer_config "${importer_identifier}"
-	then
-		die "Unable to find importer by path or name. Use --importer <name|path>. (e.g. --importer my_card_importer.ini)"
-	fi
-	mlr --csv --from "${input_file}" cat |
-	rename_txn_fields importer_config |
-	filter_relevant_columns |
-	inject_constant_fields importer_config |
-	add_optional_columns_to_txns |
-	reorder_txn_fields
 }
 
 function init_txns_file {
 	local txns_file_path="${1?Must provide a txns file path}"
 	if [[ ! -f "${txns_file_path}" ]]
 	then
-		join , "${TXNS_FILE_COLUMNS[@]}" > "${txns_file_path}"
+		join_args , "${TXNS_FILE_COLUMNS[@]}" > "${txns_file_path}"
 	fi
 }
 
@@ -234,7 +191,6 @@ function check_for_required_columns {
 	header=$(head -n 1)
 	IFS=',' read -r -a header_columns <<< "${header}"
 	# IFS="${OLD_IFS}"
-	msg "HEADER: ${header}"
 	local missing=()
 	for required in "${REQUIRED_COLUMNS[@]}"
 	do
@@ -255,7 +211,7 @@ function check_for_required_columns {
 
 	if (( ${#missing[@]} > 0 ))
 	then
-		die "Error missing columns: ${missing[*]}"
+		die "Error CSV header missing columns.\nHeader: ${header}\nMissing: $(join_args , "${missing[@]}")"
 	fi
 	# Emit header and pass through the rest of the stream
 	echo "${header}"
@@ -287,39 +243,144 @@ function add_id_column_to_txns {
 	  @i += 1
 	' 'then' reorder -f id
 }
-function import_transactions {
-	# validate import args
-	if [[ "${#ARGS[@]}" -lt 1 ]]
+function run_import {
+	local import_file="$1"
+	local importer_file="$2"
+	local -A importer_config=()
+	# find and load the matching importer
+	if ! find_matching_importer importer_config "${importer_file}"
 	then
-		die "Must provide a transaction file path as first import argument"
+		msg "Unable to find importer by path or name. Use --importer <name|path>. (e.g. --importer my_card_importer.ini)"
+		return 1
 	fi
 	
-	# check that file exists
 	# init the txns db file if not present
 	# get the next txn id to use
-	local file_to_import="${ARGS[0]}"
-	assert_existing_file "${file_to_import}"
+	# TODO consider more robust approach of using mlr to load txns file then merge with new txns before saving to file
 	init_txns_file "${TXNS_FILE_PATH}"
-	local start_id=$(( $(get_max_id "${TXNS_FILE_PATH}") + 1 ))
+	local next_id=$(( $(get_max_id "${TXNS_FILE_PATH}") + 1 ))
 
-	# read txns
-	# add id column
-	# add to txns file
-	read_external_txns "${file_to_import}" "${IMPORTER_NAME_OR_PATH}" |
-	tee /dev/stderr |
-	add_id_column_to_txns "${start_id}" |
+	# Load external txns
+	# Transform: rename fields, filter out extras, add fields, reorder
+	# Add ids then save in txns file
+	# set -x
+	mlr --csv --from "${import_file}" cat |
+	rename_txn_fields importer_config |
+	inject_constant_fields importer_config |
+	# tee /dev/stderr |
+	# check_for_required_columns | # TODO add back once impl works well
+	filter_relevant_columns |
+	add_optional_columns_to_txns |
+	reorder_txn_fields |
+	add_id_column_to_txns "${next_id}" |
 	tail -n +2 >> "${TXNS_FILE_PATH}"
 }
 
+function import_cmd {
+	local import_file=""
+	local importer_file=""
+
+	while [[ $# -gt 0 ]]; do
+	  case "$1" in
+	    --importer) importer_file="$2"; shift ;;
+	    *) import_file="$1" ;;
+	  esac
+	  shift
+	done
+
+	# validate arguments
+	if [[ -z "$import_file" || -z "$importer_file" ]]; then
+	  msg "Usage: bashbudget import <file.csv> --importer <importer.ini>"
+	  return 1
+	fi
+	if [[ ! -f "$import_file" ]]; then
+	  msg "${import_file} must be an existing file"
+	  return 1
+	fi
+	
+	run_import "$import_file" "$importer_file"
+}
+
+function reports_totals {
+    local FROM_DATE=""
+    local TO_DATE=""
+    local MONTHLY=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from)
+                FROM_DATE="$2"
+                shift
+                ;;
+            --to)
+                TO_DATE="$2"
+                shift
+                ;;
+            --monthly)
+                MONTHLY=true
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    if [[ ! -f "${TXNS_FILE_PATH}" ]]; then
+        echo "No transactions file found: ${TXNS_FILE_PATH}" >&2
+        return 1
+    fi
+
+    local FILTER_EXPR=""
+    if [[ -n "${FROM_DATE}" ]]; then
+        FILTER_EXPR+='($date >= "'"${FROM_DATE}"'")'
+    fi
+    if [[ -n "${TO_DATE}" ]]; then
+        if [[ -n "${FILTER_EXPR}" ]]; then
+            FILTER_EXPR+=' && '
+        fi
+        FILTER_EXPR+='($date <= "'"${TO_DATE}"'")'
+    fi
+
+    local MLR_CHAIN=""
+    if [[ -n "${FILTER_EXPR}" ]]; then
+        MLR_CHAIN+="filter ${FILTER_EXPR} then "
+    fi
+    if [[ "${MONTHLY}" == true ]]; then
+        MLR_CHAIN+='put $month = substr($date, 0, 7) then stats1 -a sum -f amount -g month,category'
+    else
+        MLR_CHAIN+='stats1 -a sum -f amount -g category'
+    fi
+
+    mlr --csv ${MLR_CHAIN} --from "${TXNS_FILE_PATH}"
+}
+
+function reports_cmd {
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    totals) reports_totals "$@" ;;
+    *) echo "Unknown report type: $subcmd" >&2; return 1 ;;
+  esac
+}
+
 function main {
-	case "${ACTION}" in
-		import) import_transactions ;;
-		*) die "Unsupported command '${ACTION}'" ;;
-	esac
+	if [[ $# -lt 1 ]]
+	then
+		msg "Must provide at least one command."
+		usage 1
+	fi
+	case "$1" in
+	    import)   import_cmd "${@:2}" ;;
+	    reports)  reports_cmd "${@:2}" ;;
+	    help|"")  usage ;;
+	    *)        echo "Unknown command: $1" >&2; usage ;;
+	  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
 then
-	parse_args "${@}"
-	main
+	main "${@}"
 fi

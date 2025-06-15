@@ -6,6 +6,7 @@ setup() {
 	export TMPDIR="$BATS_TEST_TMPDIR"
 	cd "$TMPDIR" || return 1
 
+	export ALL_TXNS_FILE="$TMPDIR/bashbudget_txns.csv"
 	export IMPORT_FILE="$TMPDIR/to_import.csv"
 	export IMPORTER_FILE="$TMPDIR/test_importer.ini"
 	export CONFIG_FILE="$TMPDIR/config.ini"
@@ -29,14 +30,15 @@ teardown() {
 }
 
 @test "read_external_txns parses and transforms imported transactions" {
-	run read_external_txns "$IMPORT_FILE" "${IMPORTER_FILE}"
+	run run_import "$IMPORT_FILE" "${IMPORTER_FILE}"
 	echo "${output}"
 	[ "$status" -eq 0 ]
 
+	cat "$ALL_TXNS_FILE"
 	# Should have a header and two data rows
-	echo "$output" | grep -q '^date,description,amount,account,category$'
-	echo "$output" | grep -q '2024-02-01,Cafe,-4.25,Test Account,'
-	echo "$output" | grep -q '2024-02-02,Bookstore,-15.00,Test Account,'
+	cat "$ALL_TXNS_FILE" | grep -q '^id,date,description,amount,account,category$'
+	cat "$ALL_TXNS_FILE" | grep -q '^1,2024-02-01,Cafe,-4.25,Test Account,$'
+	cat "$ALL_TXNS_FILE" | grep -q '^2,2024-02-02,Bookstore,-15.00,Test Account,$'
 }
 
 @test "add_id_column_to_txns adds unique IDs as first column" {
