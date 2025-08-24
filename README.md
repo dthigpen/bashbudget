@@ -1,16 +1,20 @@
 # bashbudget
 
-**bashbudget** is a lightweight command-line tool for managing personal finance data using Bash and CSV files. It emphasizes portability, transparency, and Unix-style composability — ideal for those who prefer simple, scriptable workflows over complex GUI software.
+**bashbudget** is a collection of bash scripts for wrangling financial data and creating a personal budget system. It emphasizes portability, transparency, and Unix-style composability — ideal for those who prefer simple, scriptable workflows over complex GUI software.
 
-**NOTE**: This is a work in progress. Stay tuned for more!
+**NOTE**: This is undergoing a rewrite, so this README has not been fully updated. Stay tuned for more!
 
 ## Features
 
-- Import and normalize transactions from different CSV formats
-- Automatically rename and enrich fields using configurable importers
-- Filter, edit, and summarize transactions with Miller (`mlr`)
-- Built-in validation to ensure data consistency
-- Simple file-based "database" that works well with version control
+- `normalize.sh`: Imports all of your various CSV bank transactions into a single normalized CSV format. Useful for further scripting.
+- `split.sh`: Splits the given series of CSV transactions into multiple CSVs by day, month, or year.
+- `categorize.sh` (Not yet implemented): Takes uncategorized transactions, and applies user input categories or suggested categories.
+- `budget.sh` (Not yet implemented): Takes transactions and a budget file to report monthly spending
+<!-- - Import and normalize transactions from different CSV formats -->
+<!-- - Automatically rename and enrich fields using configurable importers -->
+<!-- - Filter, edit, and summarize transactions with Miller (`mlr`) -->
+<!-- - Built-in validation to ensure data consistency -->
+<!-- - Simple file-based "database" that works well with version control -->
 
 ## Requirements
 
@@ -23,6 +27,7 @@ Development dependencies
 
 ## 🔧 Installation
 
+<!-- 
 There is no installation script for now, just download the `bashbudget` script, make it executable, and run it.
 
 ### Quick Install with `curl` or `wget`
@@ -60,9 +65,10 @@ chmod +x bin/bashbudget
 # may require sudo (e.g. sudo mv bin/bashbudget /usr/local/bin/)
 mv bin/bashbudget /usr/local/bin/
 ```
-
+-->
 ## Usage
 
+<!--
 Here’s a simple (future) usage example to import a CSV file using a named importer config:
 
 ```
@@ -74,6 +80,8 @@ Then generate a category summary:
 ```
 bashbudget reports totals --from 2024-01-01 --to 2024-06-01
 ```
+
+-->
 
 ## Project Goals
 
