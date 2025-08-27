@@ -6,7 +6,7 @@ REQUIRED_COLUMNS=("date" "description" "amount" "account")
 OPTIONAL_COLUMNS=("category" "notes")
 ALL_COLUMNS=("date" "description" "amount" "account" "category")
 INPUT_FILES=()
-OUTPUT_FILE=''
+OUTPUT_FILE='-'
 IMPORTER_FILES=()
 DRY_RUN=false
 
@@ -63,27 +63,28 @@ function parse_args() {
 		exit 1
 	fi
 }
-
-function setup_fds() {
-	# decide input source: files vs stdin
-	if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
-		# No files given -> stdin, otherwise use INPUT_FILES later
-		exec 3<&0
-	fi
-
-	# decide output: file vs stdout
-	if [[ -n "${OUTPUT_FILE}" ]]; then
-		exec 4>"${OUTPUT_FILE}"
-	else
-		exec 4>&1
-	fi
-}
+# 
+# function setup_fds() {
+# 	# decide input source: files vs stdin
+# 	if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
+# 		# No files given -> stdin, otherwise use INPUT_FILES later
+# 		exec 3<&0
+# 	fi
+# 
+# 	# decide output: file vs stdout
+# 	if [[ -n "${OUTPUT_FILE}" ]]; then
+# 		exec 4>"${OUTPUT_FILE}"
+# 	else
+# 		exec 4>&1
+# 	fi
+# }
 
 validate_and_pass() {
     local header_read=false
     while IFS= read -r line; do
         if ! $header_read; then
             # Always pass through header line
+            msg "DT_DEBUG line:${line}"
             echo "$line"
             header_read=true
             continue
@@ -94,7 +95,7 @@ validate_and_pass() {
 
         # Validate YYYY-MM-DD
         if [[ "$first_field" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            echo "$line"
+            echo "LINE $line"
         else
             echo "Error: invalid date '$first_field'" >&2
             exit 1
@@ -131,30 +132,10 @@ function process_input() {
    	filter_relevant_columns |
    	add_optional_columns_to_txns |
    	reorder_txn_fields |
-   	debug_pass |
+   	# debug_pass |
    	validate_and_pass
     
 }
-function run() {
-	if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
-		# stdin mode
-		process_input >&4
-	else
-		local first=1
-		for f in "${INPUT_FILES[@]}"; do
-			msg "Processing: $f"
-			if [[ $first -eq 1 ]]; then
-				# cat "${f}" | process_input
-				process_input < "${f}" >&4
-				first=0
-			else
-				# cat "${f}" | process_input | tail -n +2
-				process_input < "${f}" | tail -n +2 >&4
-			fi
-		done
-	fi
-}
-
 
 # ------------------------------------------------------------------------------
 # Parse an importer.ini into an associative array
@@ -166,38 +147,155 @@ parse_ini() {
         out["${key}"]="${value}"
     done < "${file}"
 }
+# 
+# # Try to match a CSV to an importer.ini
+# match_importer() {
+#     local csv_file="$1"
+#     local header
+#     header=$(head -n 1 "${csv_file}" | tr -d '\r')
+# 
+#     for ini in "${IMPORTER_FILES[@]}"; do
+#         declare -A cfg=()
+#         parse_ini "${ini}" cfg
+#         if [[ -n "${cfg[match_header]-}" ]]; then
+#             if [[ "${header}" == "${cfg[match_header]}" ]]; then
+#                 echo "${ini}"
+#                 return 0
+#             fi
+#         elif [[ -n "${cfg[match_header_pattern]-}" ]]; then
+#             if [[ "${header}" =~ ${cfg[match_header_pattern]} ]]; then
+#                 echo "${ini}"
+#                 return 0
+#             fi
+# 		elif [[ -n "${cfg[match_file_name_pattern]-}" ]]; then
+# 			# TODO resolve to full path so user can match on subdir?
+#             if [[ "${csv_file}" =~ ${cfg[match_file_name_pattern]} ]]; then
+#                 echo "${ini}"
+#                 return 0
+#             fi
+#         fi
+#     done
+# 
+#     return 1
+# }
+# importers array is passed by name; e.g. match_importer IMPORTER_FILES
+match_importer_and_normalize() {
+    local -n _importers="$1"
+	local filename="${2-}"
 
-# Try to match a CSV to an importer.ini
-match_importer() {
-    local csv_file="$1"
+    # Read first line (header) from stdin
     local header
-    header=$(head -n 1 "${csv_file}" | tr -d '\r')
+    if ! IFS= read -r header; then
+        echo "ERROR: empty input (no header)" >&2
+        return 1
+    fi
+    # Strip possible BOM and CR
+    # BOM: 0xEF 0xBB 0xBF
+    header="${header#"$'\xEF\xBB\xBF'"}"
+    header="${header%$'\r'}"
 
-    for ini in "${IMPORTER_FILES[@]}"; do
-        declare -A cfg=()
-        parse_ini "${ini}" cfg
-        if [[ -n "${cfg[match_header]-}" ]]; then
-            if [[ "${header}" == "${cfg[match_header]}" ]]; then
-                echo "${ini}"
-                return 0
-            fi
-        elif [[ -n "${cfg[match_header_pattern]-}" ]]; then
-            if [[ "${header}" =~ ${cfg[match_header_pattern]} ]]; then
-                echo "${ini}"
-                return 0
-            fi
-		elif [[ -n "${cfg[match_file_name_pattern]-}" ]]; then
-			# TODO resolve to full path so user can match on subdir?
-            if [[ "${csv_file}" =~ ${cfg[match_file_name_pattern]} ]]; then
-                echo "${ini}"
-                return 0
-            fi
-        fi
-    done
+    # Auto-pick if only one importer
+    local chosen=""
+    if [[ ${#_importers[@]} -eq 1 ]]; then
+        chosen="${_importers[0]}"
+    else
+        # Try each ini
+        local ini mh mhp
+        for ini in "${_importers[@]}"; do
+            # Read keys (allow missing)
+            mh="$(sed -n 's/^[[:space:]]*match_header[[:space:]]*=[[:space:]]*//p' "${ini}" | head -n1 || true)"
+            mhp="$(sed -n 's/^[[:space:]]*match_header_pattern[[:space:]]*=[[:space:]]*//p' "${ini}" | head -n1 || true)"
+            mfnp="$(sed -n 's/^[[:space:]]*match_file_name_pattern[[:space:]]*=[[:space:]]*//p' "${ini}" | head -n1 || true)"
 
-    return 1
+            # Exact match first
+            if [[ -n "${mh}" && "${header}" == "${mh}" ]]; then
+                chosen="${ini}"
+                break
+            fi
+            # Regex match (unquoted on RHS by design for [[ =~ ]])
+            if [[ -n "${mhp}" && "${header}" =~ ${mhp} ]]; then
+                chosen="${ini}"
+                break
+            fi
+
+            if [[ -n "${mfnp}" ]]; then
+				if [[ -z "${filename}" || "${filename}" == '-' ]]; then
+					msg "Warning: Importer ${ini} has a file name match rule but piped in content has no filename"
+				fi
+	            # Regex match (unquoted on RHS by design for [[ =~ ]])
+	            if [[ "${filename}" =~ ${mfnp} ]]; then
+	                chosen="${ini}"
+	                break
+	            fi
+            fi
+        done
+    fi
+
+    if [[ -z "${chosen}" ]]; then
+        {
+            echo "ERROR: no matching importer for header:"
+            printf '  header: %q\n' "${header}"
+        } >&2
+        return 1
+    fi
+
+    # Optional debug
+    echo "INFO: matched importer: ${chosen}" >&2
+
+    # Emit metadata + original stream
+    # echo "#importer=${chosen}"
+    {
+	    echo "${header}"
+	    cat
+    } | normalize_stream "${chosen}"
 }
 
+normalize_stream() {
+    local importer="$1"
+    local line=''
+    local count=0
+	msg "DT_DEBUG starting normalize_stream"
+    # Peel the importer line, then forward the remaining CSV unchanged
+    # {
+    #     # Read until we’ve consumed the importer line and the first non-metadata line
+    #     while IFS= read -r line; do
+    #     	msg "DT_DEBUG parsing ${line}"
+    #     	((count=count+1))
+    #         if [[ "${line}" == \#importer=* ]]; then
+    #             importer="${line#\#importer=}"
+    #         	msg "DT_DEBUG FOUND header: ${importer}"
+    #             continue
+    #         fi
+    #         # First non-metadata line: put it back to stdout and stream the rest verbatim
+    #         echo "${line}"
+    #         cat
+    #         break
+    #     done
+    # } | 
+    # {
+    	# msg "DT_DEBUG here ${line} ${importer} ${count}"
+    if [[ -z "${importer}" ]]; then
+        echo "ERROR: no importer specified in input stream (missing #importer=… line)" >&2
+        exit 1
+    fi
+
+    # --- Your existing normalize steps go here ---
+    # Example scaffold using your INI to build args:
+    declare -A IMPORTER_CONFIG=()
+    parse_ini "${importer}" IMPORTER_CONFIG
+
+    # Transform: rename fields, filter out extras, add fields, reorder
+   	mlr --csv cat |
+   	rename_txn_fields IMPORTER_CONFIG |
+   	inject_constant_fields IMPORTER_CONFIG |
+   	format_date IMPORTER_CONFIG |
+   	filter_relevant_columns |
+   	add_optional_columns_to_txns |
+   	reorder_txn_fields |
+   	# debug_pass |
+   	validate_and_pass
+    # }
+}
 
 function join_args {
 	local IFS="${1}"
@@ -301,8 +399,29 @@ function reorder_txn_fields {
 	mlr --csv reorder -f "${fields}"
 }
 
+function run_pipeline() {
+    local infile="$1"
+    if [[ "${infile}" == "-" ]]; then
+        match_importer_and_normalize IMPORTER_FILES "${infile}"
+    else
+        match_importer_and_normalize IMPORTER_FILES "${infile}" < "${infile}"
+    fi
+}
+
+function run() {
+	{
+	    if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
+	        run_pipeline "-"
+	    else
+	        for f in "${INPUT_FILES[@]}"; do
+	            run_pipeline "${f}"
+	        done
+	    fi
+	} > "${OUTPUT_FILE}"
+}
+
 
 parse_args "${@}"
-setup_fds
+# setup_fds
 run
 
