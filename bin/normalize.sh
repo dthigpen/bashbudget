@@ -84,7 +84,7 @@ validate_and_pass() {
     while IFS= read -r line; do
         if ! $header_read; then
             # Always pass through header line
-            msg "DT_DEBUG line:${line}"
+            # msg "DT_DEBUG line:${line}"
             echo "$line"
             header_read=true
             continue
@@ -95,7 +95,7 @@ validate_and_pass() {
 
         # Validate YYYY-MM-DD
         if [[ "$first_field" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            echo "LINE $line"
+            echo "$line"
         else
             echo "Error: invalid date '$first_field'" >&2
             exit 1
@@ -147,37 +147,7 @@ parse_ini() {
         out["${key}"]="${value}"
     done < "${file}"
 }
-# 
-# # Try to match a CSV to an importer.ini
-# match_importer() {
-#     local csv_file="$1"
-#     local header
-#     header=$(head -n 1 "${csv_file}" | tr -d '\r')
-# 
-#     for ini in "${IMPORTER_FILES[@]}"; do
-#         declare -A cfg=()
-#         parse_ini "${ini}" cfg
-#         if [[ -n "${cfg[match_header]-}" ]]; then
-#             if [[ "${header}" == "${cfg[match_header]}" ]]; then
-#                 echo "${ini}"
-#                 return 0
-#             fi
-#         elif [[ -n "${cfg[match_header_pattern]-}" ]]; then
-#             if [[ "${header}" =~ ${cfg[match_header_pattern]} ]]; then
-#                 echo "${ini}"
-#                 return 0
-#             fi
-# 		elif [[ -n "${cfg[match_file_name_pattern]-}" ]]; then
-# 			# TODO resolve to full path so user can match on subdir?
-#             if [[ "${csv_file}" =~ ${cfg[match_file_name_pattern]} ]]; then
-#                 echo "${ini}"
-#                 return 0
-#             fi
-#         fi
-#     done
-# 
-#     return 1
-# }
+
 # importers array is passed by name; e.g. match_importer IMPORTER_FILES
 match_importer_and_normalize() {
     local -n _importers="$1"
@@ -240,7 +210,7 @@ match_importer_and_normalize() {
     fi
 
     # Optional debug
-    echo "INFO: matched importer: ${chosen}" >&2
+    # echo "INFO: matched importer: ${chosen}" >&2
 
     # Emit metadata + original stream
     # echo "#importer=${chosen}"
@@ -254,25 +224,7 @@ normalize_stream() {
     local importer="$1"
     local line=''
     local count=0
-	msg "DT_DEBUG starting normalize_stream"
-    # Peel the importer line, then forward the remaining CSV unchanged
-    # {
-    #     # Read until we’ve consumed the importer line and the first non-metadata line
-    #     while IFS= read -r line; do
-    #     	msg "DT_DEBUG parsing ${line}"
-    #     	((count=count+1))
-    #         if [[ "${line}" == \#importer=* ]]; then
-    #             importer="${line#\#importer=}"
-    #         	msg "DT_DEBUG FOUND header: ${importer}"
-    #             continue
-    #         fi
-    #         # First non-metadata line: put it back to stdout and stream the rest verbatim
-    #         echo "${line}"
-    #         cat
-    #         break
-    #     done
-    # } | 
-    # {
+	
     	# msg "DT_DEBUG here ${line} ${importer} ${count}"
     if [[ -z "${importer}" ]]; then
         echo "ERROR: no importer specified in input stream (missing #importer=… line)" >&2
@@ -409,17 +361,26 @@ function run_pipeline() {
 }
 
 function run() {
-	{
-	    if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
-	        run_pipeline "-"
-	    else
-	        for f in "${INPUT_FILES[@]}"; do
-	            run_pipeline "${f}"
-	        done
-	    fi
-	} > "${OUTPUT_FILE}"
-}
+    if [[ "${OUTPUT_FILE}" == "-" ]]; then
+        exec 4>&1   # FD 4 → stdout
+    else
+        exec 4> "${OUTPUT_FILE}"   # FD 4 → file
+    fi
 
+    if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
+        run_pipeline "-" >&4
+    else
+        local first=1
+        for f in "${INPUT_FILES[@]}"; do
+            if [[ $first -eq 1 ]]; then
+            	run_pipeline "${f}" >&4
+            else
+            	run_pipeline "${f}" | tail -n +2 >&4
+            fi
+            first=0
+        done
+    fi
+}
 
 parse_args "${@}"
 # setup_fds

@@ -21,7 +21,7 @@ parse_args() {
                 SPLIT_BY="$2"
                 shift 2
                 ;;
-            --output-dir)
+            -o|--output-dir)
                 OUTPUT_DIR="$2"
                 shift 2
                 ;;
@@ -70,9 +70,13 @@ process_all_inputs() {
                 -o "${OUTPUT_DIR}/%date%-transactions.csv" ${inputs}
             ;;
         month)
-            mlr --csv put '$month = substr($date,0,7)' \
-                then split -g month \
-                -o "${OUTPUT_DIR}/%month%-transactions.csv" ${inputs}
+			mlr --csv \
+			  filter '$date =~ "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"' \
+			  then put '$month = substr($date,0,6)' \
+			  then split -g month \
+			    --prefix "${OUTPUT_DIR%/}/" \
+			    --suffix "-transactions.csv" \
+			    -j ''
             ;;
         year)
             mlr --csv put '$year = substr($date,0,4)' \
@@ -84,6 +88,13 @@ process_all_inputs() {
             exit 1
             ;;
     esac
+    for f in "${OUTPUT_DIR}"/*.csv; do
+    	mlr --csv \
+    		cut -x -f month \
+    		then cat \
+    		"${f}" > "${f/.-transactions.csv/-transactions.csv}"
+    		rm -f "${f}"
+    done
 }
 
 main() {
