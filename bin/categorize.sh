@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -x
+# set -x
 REF_FILES=()
 SUGGEST=false
 INTERACTIVE=false
@@ -69,7 +69,7 @@ load_references() {
         mlr --csv cat "${REF_FILES[@]}" > "$REF_TEMP"
     else
         # empty file with just header for safe use
-        echo "date,description,amount,account,category" > "$REF_TEMP"
+        echo "date,description,amount,account,category,notes" > "$REF_TEMP"
     fi
 }
 
@@ -134,7 +134,7 @@ process_transactions() {
 			    prompt="Enter category"
 			    [[ -n "${suggested:-}" ]] && prompt+=" [${suggested}]"
 			    prompt+=": "
-			
+				msg "Date: ${date}\nDesc: ${desc}\nAmount: ${amount}\nAccount: ${account}\nExtra: ${rest}"
 			    # Read from the terminal instead of stdin
 			    read -r -p "$prompt" user_input < /dev/tty
 			
@@ -152,13 +152,18 @@ process_transactions() {
     done < <("${mlr_cmd[@]}")
 
     # cleanup temp file if stdin was captured
-    [[ -n "${tmp_in:-}" ]] && rm -f "$tmp_in"
+    if [[ -n "${tmp_in:-}" ]]; then
+		rm -f "$tmp_in"
+	fi
 }
 
 main() {
     parse_args "$@"
     load_references
+    
     process_transactions "${INPUT}"
+    cp $REF_TEMP ref.csv
+    # cat "${REF_TEMP}"
     rm -f "$REF_TEMP"
 }
 
