@@ -2,16 +2,13 @@
 set -euo pipefail
 
 # Globals
-REQUIRED_COLUMNS=("date" "description" "amount" "account")
-OPTIONAL_COLUMNS=("category" "notes")
-ALL_COLUMNS=("date" "description" "amount" "account" "category")
+ALL_COLUMNS=("date" "description" "amount" "account" "category" "notes" "id")
 INPUT_FILES=()
 OUTPUT_FILE='-'
 IMPORTER_FILES=()
-DRY_RUN=false
 
 usage() {
-    echo "Usage: $0 <input1.csv> <input2.csv> --importers <ini-file> --output <csv-file> [--dry-run]"
+    echo "Usage: $0 <input1.csv> <input2.csv> --importers <ini-file> --output <csv-file>"
     exit 1
 }
 
@@ -36,10 +33,6 @@ function parse_args() {
 	            	shift
 	        	done
 	            ;;
-	        --dry-run)
-	            DRY_RUN='true'
-	            shift
-	            ;;
             -h|--help)
             	usage
             	;;
@@ -63,28 +56,12 @@ function parse_args() {
 		exit 1
 	fi
 }
-# 
-# function setup_fds() {
-# 	# decide input source: files vs stdin
-# 	if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
-# 		# No files given -> stdin, otherwise use INPUT_FILES later
-# 		exec 3<&0
-# 	fi
-# 
-# 	# decide output: file vs stdout
-# 	if [[ -n "${OUTPUT_FILE}" ]]; then
-# 		exec 4>"${OUTPUT_FILE}"
-# 	else
-# 		exec 4>&1
-# 	fi
-# }
 
 validate_and_pass() {
     local header_read=false
     while IFS= read -r line; do
         if ! $header_read; then
             # Always pass through header line
-            # msg "DT_DEBUG line:${line}"
             echo "$line"
             header_read=true
             continue
@@ -108,33 +85,6 @@ function debug_pass() {
 		msg "DEBUG: ${line}"
 		echo "${line}"
 	done
-}
-function process_input() {
-	local importer=''
-	if (( ${#IMPORTER_FILES[@]} == 1 )); then
-		importer="${IMPORTER_FILES[0]}"
-	else
-		importer="$(match_importer "${f}")" || {
-	        msg "No matching importer found for ${f}"
-	        exit 1
-	    }
-		# read importer
-	    declare -A IMPORTER_CONFIG=()
-	    parse_ini "${importer}" IMPORTER_CONFIG
-	fi
-	msg "Using importer ${importer}"
-    # Load external txns
-   	# Transform: rename fields, filter out extras, add fields, reorder
-   	mlr --csv cat |
-   	rename_txn_fields IMPORTER_CONFIG |
-   	inject_constant_fields IMPORTER_CONFIG |
-   	format_date IMPORTER_CONFIG |
-   	filter_relevant_columns |
-   	add_optional_columns_to_txns |
-   	reorder_txn_fields |
-   	# debug_pass |
-   	validate_and_pass
-    
 }
 
 # ------------------------------------------------------------------------------
@@ -242,7 +192,8 @@ normalize_stream() {
    	inject_constant_fields IMPORTER_CONFIG |
    	format_date IMPORTER_CONFIG |
    	filter_relevant_columns |
-   	add_optional_columns_to_txns |
+   	add_missing_columns_to_txns |
+   	add_hash_id |
    	reorder_txn_fields |
    	# debug_pass |
    	validate_and_pass
@@ -333,16 +284,21 @@ function filter_relevant_columns {
 	mlr --csv cut -f "${columns}" 'then' 'cat'
 }
 
-function add_optional_columns_to_txns {
+function add_missing_columns_to_txns {
 	local putexprs=()
-	for col in "${OPTIONAL_COLUMNS[@]}"
+	for col in "${ALL_COLUMNS[@]}"
 	do
 		put_exprs+=("if (!haskey(\$*, \"$col\")) { \$$col = \"\"}")
 	done
 	local put_chain
 	put_chain=$(IFS='; '; echo "${put_exprs[*]}")
 	mlr --csv put "${put_chain}"
-	
+}
+
+function add_hash_id {
+	mlr --csv put '
+      $id = substr(sha1($date . "|" . $amount . "|" . $account . "|" . $description), 1, 10)
+    '
 }
 
 function reorder_txn_fields {

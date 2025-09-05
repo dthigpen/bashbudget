@@ -66,8 +66,8 @@ process_all_inputs() {
 
     case "${SPLIT_BY}" in
         day)
-            mlr --csv split -g date \
-                -o "${OUTPUT_DIR}/%date%-transactions.csv" ${inputs}
+            msg 'Not implemented yet'
+            exit 1
             ;;
         month)
 			mlr --csv \
@@ -79,9 +79,8 @@ process_all_inputs() {
 			    -j ''
             ;;
         year)
-            mlr --csv put '$year = substr($date,0,4)' \
-                then split -g year \
-                -o "${OUTPUT_DIR}/%year%-transactions.csv" ${inputs}
+            msg 'Not implemented yet'
+            exit 1
             ;;
         *)
             msg "Unknown split type: ${SPLIT_BY}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+set -x
 print_usage() {
     cat <<EOF
 Usage: $0 [OPTIONS] primary.csv [secondary.csv ...]
@@ -76,34 +76,122 @@ validate_columns() {
         done
     done
 }
+apply_deletes() {
+    local primary="$1"
+    local secondary="$2"
 
-build_pipeline() {
-    local cmd=()
+    # Step 1: collect IDs to delete
+    local ids_to_delete
+    ids_to_delete=$(mlr --csv filter '
+        is_not_empty($id) &&
+        (is_empty($date) || $date=="") &&
+        (is_empty($amount) || $amount=="") &&
+        (is_empty($account) || $account=="") &&
+        (is_empty($description) || $description=="") &&
+        (is_empty($category) || $category=="") &&
+        (is_empty($notes) || $notes=="")
+    ' then cut -f id "$secondary")
 
-    if [[ ${#JOIN_COLS[@]} -eq 0 ]]; then
-        cmd=(mlr --csv cat "${INPUT_FILES[@]}")
-    else
-        local primary="${INPUT_FILES[0]}"
-        local rest=("${INPUT_FILES[@]:1}")
-        local join_cols_str
-        join_cols_str="$(IFS=,; echo "${JOIN_COLS[*]}")"
-
-        cmd=(mlr --csv join --lp '' --rp '' --ul -j "$join_cols_str" -f "${INPUT_FILES[@]}")
+    # If no deletes, just echo the primary
+    if [[ -z "$ids_to_delete" ]]; then
+        cat "$primary"
+        return
     fi
 
-    printf '%s\n' "${cmd[@]}"
-    
+    # Step 2: remove matching rows from primary
+    # Build an mlr filter like: $id!="abc" && $id!="def"
+    local delete_expr=""
+    while IFS= read -r id; do
+        [[ -n "$delete_expr" ]] && delete_expr+=" && "
+        delete_expr+="\$id!=\"$id\""
+    done <<< "$ids_to_delete"
+
+    mlr --csv filter "$delete_expr" "$primary"
+}
+
+apply_updates() {
+    local primary="$1"
+    local secondary="$2"
+
+    mlr --csv join --ul --ur -j id -f "$primary" "$secondary"
+}
+
+apply_adds() {
+    local primary="$1"
+    local secondary="$2"
+	tmp_adds=$(mktemp)
+	mlr --csv filter 'is_empty($id)' "$secondary" > "${tmp_adds}"
+	head -4 "${primary}" >&2
+	cp $primary primary.tmp.txt
+	cp $primary secondary.tmp.txt
+	cp $tmp_adds adds.tmp.txt
+	echo '---' >&2
+	head -4 "${tmp_adds}" >&2
+    mlr --csv cat "$primary" "${tmp_adds}"
+}
+
+check_dangling_ids() {
+    local primary="$1"
+    local secondary="$2"
+
+    # Anti-join: keep only rows from secondary whose id does not exist in primary
+    local dangling
+    dangling=$(mlr --csv join -j id -lu -f "$secondary" "$primary")
+
+    if [[ -n "$dangling" ]]; then
+        echo "Error: dangling IDs found in '$secondary' that are not in primary:" >&2
+        echo "$dangling" >&2
+        exit 1
+    fi
+}
+
+build_pipeline() {
+    local primary="${INPUT_FILES[0]}"
+    local secondaries=("${INPUT_FILES[@]:1}")
+
+    # Start with the primary file (copy to temp so we never modify original)
+    local current
+    current=$(mktemp)
+    cp "$primary" "$current"
+
+    for sec in "${secondaries[@]}"; do
+        # Step 0: check for dangling IDs
+        check_dangling_ids "$current" "$sec"
+
+        # Step 1: apply deletes
+        local tmp_del
+        tmp_del=$(mktemp)
+        apply_deletes "$current" "$sec" > "$tmp_del"
+
+        # Step 2: apply updates
+        local tmp_upd
+        tmp_upd=$(mktemp)
+        apply_updates "$tmp_del" "$sec" > "$tmp_upd"
+
+        # Step 3: apply adds (in-place append, careful with headers)
+        local tmp_final
+        tmp_final=$(mktemp)
+        apply_adds "$tmp_upd" "$sec" > "$tmp_final"
+
+        # Advance to next iteration
+        current="$tmp_final"
+    done
+
+    # Return path to the final file
+    echo "$current"
 }
 
 main() {
     parse_args "$@"
     validate_columns
-    local -a cmd
-    mapfile -t cmd < <(build_pipeline)
+
+    local final_file
+    final_file=$(build_pipeline)
+
     if [[ -n "$OUTPUT_FILE" ]]; then
-        "${cmd[@]}" > "$OUTPUT_FILE"
+        cp "$final_file" "$OUTPUT_FILE"
     else
-        "${cmd[@]}"
+        cat "$final_file"
     fi
 }
 
